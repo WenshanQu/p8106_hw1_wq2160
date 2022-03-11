@@ -1,0 +1,276 @@
+---
+title: "p8106_hw1_wq2160"
+author: "Wenshan Qu (wq2160)"
+date: "2/12/2022"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    toc_depth: 3
+  header-includes:
+    -\usepackage{fancyhdr}
+    -\usepackage{lipsum}
+    -\pagestyle{fancy}
+    -\fancyhead[R]{\thepage}
+    -\fancypagestyle{plain}{\pagestyle{fancy}}
+---
+\newpage
+
+```{r setup, include=FALSE}
+library(caret)
+library(tidyverse)
+library(glmnet)
+library(pls)
+```
+
+Import csv files.
+```{r message = FALSE}
+train_data = read_csv("./data/housing_training.csv")
+test_data = read_csv("./data/housing_test.csv")
+```
+
+Set train data and test data, create predictor matrix and changing categorial variables into dummy variables.
+```{r}
+## Train Data
+train_data = na.omit(train_data) 
+## Matrix of Predictors
+x_train = model.matrix(Sale_Price ~ ., train_data)[ ,-1]
+## Vector of Response
+y_train = train_data$Sale_Price
+
+## Test Data
+test_data = na.omit(test_data)
+## Matrix of Predictors
+x_test = model.matrix(Sale_Price ~ ., test_data)[ ,-1]
+## Vector of Response
+y_test = test_data$Sale_Price
+```
+
+## Least Squares
+
+Fit a linear model using least squares on the training data. Is there any potential disadvantage of this model?
+
+**Cross Validation**
+```{r warning=FALSE}
+ctrl1 = trainControl(method = "repeatedcv", number = 10, repeats = 5)
+
+## Fit Least Square Model "ls_fit"
+set.seed(33)
+ls_fit = train(x = x_train, y = y_train, 
+               preProcess = c("center", "scale"),
+               method = "lm", 
+               trControl = ctrl1)
+```
+
+**Coefficients of Final LS Model**
+```{r}
+coef(ls_fit$finalModel)
+```
+
+**Report Test Error**
+```{r warning=FALSE}
+## Make Prediction on Test Data
+predy2_lm = predict(ls_fit, x_test)
+
+## Test MSE
+lm_test_mse = mean((y_test - predy2_lm)^2)
+lm_test_mse
+
+## Test RMSE
+lm_test_rmse = RMSE(predy2_lm, y_test)
+lm_test_rmse
+```
+
+**Potential Disadvantages**
+1) OLS could be very **sensitive to outliers**;
+2) Real-world data tend to be more complicated and **non-linear**;
+3) May **include too many features**, and LS method may particularly prone to this problem, for as soon as the number of features used exceeds the number of training data points, the least squares solution will not be unique, and hence the least squares algorithm will fail;
+4) A subset of the independent variables significantly correlated to each other (**collinearity**) may lead to poor performance of LS model (variance will be inflated).
+
+## Lasso
+
+Fit a lasso model on the training data and report the test error. When the 1SE rule is applied, how many predictors are included in the model?
+
+_Note: Here we use two methods `glmnet` and `caret` to fit the Lasso model. Model fitted by `caret` will be used in future model comparison._
+
+### Using `glmnet`
+
+**Cross Validation**
+```{r}
+## Fit a Lasso Model "cv.lasso"
+set.seed(33)
+lasso_fit = cv.glmnet(x = x_train, y = y_train, 
+                      alpha = 1, 
+                      lambda = exp(seq(7, 2, length = 100)))
+
+plot(lasso_fit)
+abline(h = (lasso_fit$cvm + lasso_fit$cvsd)[which.min(lasso_fit$cvm)], col = 4, lwd = 2)
+
+## Lambda Choices
+## min CV MSE
+lasso_fit$lambda.min
+## the 1SE rule (our choice in this case)
+lasso_fit$lambda.1se
+```
+
+**Coefficients of the final model**
+```{r}
+## Coefficients of the Final Lasso Model (with lambda 1SE)
+lasso_coeff = predict(lasso_fit, s = lasso_fit$lambda.1se, type = "coefficients")
+lasso_coeff
+
+## Number of non-zero coefficients
+num_lasso_coeff = length(which(lasso_coeff != 0))
+num_lasso_coeff
+```
+Here for the final lasso model with 1SE rule lambda, we got `r length(which(lasso_coeff != 0))`` predictors in the model.
+
+**Report Test Error**
+```{r}
+## Make Prediction on Test Data
+predy2_lasso = predict(lasso_fit, newx = x_test, 
+                       s = "lambda.1se", type = "response")
+
+## Test MSE
+lasso_test_mse = mean((y_test - predy2_lasso)^2)
+lasso_test_mse
+
+## Test RMSE
+lasso_test_rmse = RMSE(predy2_lasso, y_test)
+lasso_test_rmse
+```
+
+**Comments**: The test error is RMSE = 20539.1, and based on 1SE rule, 30 predictors will be included in the final model.
+
+### Using `caret`
+To compare models (i.e., using `resample()` function later in this assignment), we have to build a lasso model using `caret`.
+```{r}
+ctrl2 = trainControl(method = "cv", selectionFunction = "oneSE")
+
+## Build alternative Lasso Model with `caret`
+set.seed(33)
+lasso_caret = train(x = x_train, y = y_train,
+                    method = "glmnet",
+                    tuneGrid = expand.grid(alpha = 1, 
+                                          lambda = exp(seq(7, 2, length=100))),
+                    trControl = ctrl1)
+
+## Check Best Tune
+plot(lasso_caret, xTrans = log)
+lasso_caret$bestTune
+```
+We could use `ctrl2 = trainControl(method = "cv", selectionFunction = "oneSE")` and replace it with "ctrl1" in `lasso_caret` to extract best tune based on 1SE rule. While to satisfy the requirement of `resample()` function, we could not make this change here.
+
+## Elastic net
+
+Fit an elastic net model on the training data. Report the selected tuning parameters and the test error.
+
+**Cross Validation**
+```{r}
+## Fit Elastic Model "enet.fit"
+set.seed(33)
+enet_fit = train(x = x_train, y = y_train,
+                  method = "glmnet",
+                  tuneGrid = expand.grid(alpha = seq(0, 1, length = 21), 
+                                         lambda = exp(seq(7, -3, length = 50))),
+                  trControl = ctrl1)
+
+## Plot Tune vs. RMSE (Rainbow plot)
+myCol = rainbow(25)
+myPar = list(superpose.symbol = list(col = myCol),
+                    superpose.line = list(col = myCol))
+
+plot(enet_fit, par.settings = myPar)
+
+## Select Tuning Parameter
+enet_fit$bestTune
+```
+
+**Coefficients of Final Model**
+```{r}
+coef(enet_fit$finalModel, enet_fit$bestTune$lambda)
+```
+
+**Report Test Error**
+```{r}
+## Make Prediction on Test Data
+predy2_enet = predict(enet_fit, newdata = x_test)
+
+## Test MSE
+enet_test_mse = mean((y_test - predy2_enet)^2)
+enet_test_mse
+
+## Test RMSE
+enet_test_rmse = RMSE(predy2_enet, y_test)
+enet_test_rmse
+```
+
+**Comments**: Selected tune parameter is alpha = 0.05 and lambda = 594.52, and the test error is RMSE = 20939.58.
+
+## Partial Least Squares (PLS)
+
+Fit a partial least squares model on the training data and report the test error. How many components are included in your model?
+
+### Using `plsr`
+
+**Cross Validation**
+```{r}
+## Fit PLS Model "pls.fit"
+set.seed(33)
+pls_fit = plsr(Sale_Price ~ .,
+               data = train_data,
+               scale = TRUE,
+               validation = "CV")
+
+## Summary and Visualization
+summary(pls_fit)
+
+validationplot(pls_fit, val.type = "MSEP", legendpos = "topright")
+```
+
+**Find Best Number of Components**
+```{r}
+cv_mse = RMSEP(pls_fit)
+ncomp_cv = which.min(cv_mse$val[1,,])-1
+ncomp_cv
+```
+Thus there are 11 components in the final pls model.
+
+**Report Test Error**
+```{r}
+## Make Prediction based on Test Data
+predy2_pls = predict(pls_fit, newdata = x_test, ncomp = ncomp_cv)
+
+## Test MSE
+pls_test_mse = mean((y_test - predy2_pls)^2)
+pls_test_mse
+
+## Test RMSE
+pls_test_rmse = RMSE(predy2_pls, y_test)
+pls_test_rmse
+```
+
+**Comments**: Based on `plsr()`, 11 components are included in my model, and test error is RMSE = 21243.27.
+
+### Using `caret`
+```{r}
+## Build up a PLS Model with `caret`
+set.seed(33)
+pls_caret = train(x = x_train, y = y_train,
+                  method = "pls",
+                  tuneGrid  = data.frame(ncomp = 1:39),
+                  trControl = ctrl1,
+                  preProcess = c("center", "scale"))
+pls_caret$bestTune
+```
+I noticed that using `caret` will lead to the result that the best number of components is 12 (instead of 11 components derived by `plsr`), while I believe this should be attributed to the underlying arithmetic difference between these two packages, combined with the fact that the RMSE of 11 and 12 components model are quite close, the different component result is reasonable.
+
+## Compare Models
+Based on the mean and median of RMSE, I prefer `elastic net` model for prediction, since it has the smallest RMSE among 4 models.
+```{r}
+resamp = resamples(list(ls = ls_fit, lasso = lasso_caret, enet = enet_fit, pls = pls_caret))
+summary(resamp)
+
+bwplot(resamp, metric = "RMSE")
+```
+
